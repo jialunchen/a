@@ -1,0 +1,312 @@
+# Python PySide OpenCV Video GUI App
+# Author:  Ming-Ching Chang
+# Version / Development Log:
+#   2018/01/28  Initial Version
+
+# The only dependency is PySide, numpy, OpenCV.
+# No matplotlib
+
+import numpy as np
+
+import cv2
+from PySide.QtCore import *
+from PySide.QtGui import *
+
+import xml.etree.ElementTree as ET
+    
+# This enables to import PyCVApp/*.py
+import sys; sys.path.insert(0, '..')
+
+import var
+import ImageViz.viz_widget as viz_widget
+import ImageViz.np_qim as np_qim
+
+import VideoViz.VideoViz_var as VideoViz_var
+import VideoViz.ocv_vid as ocv_vid
+import VideoViz.VideoVizWnd as VideoVizWnd
+
+
+def read_xml(path):    
+    tree = ET.parse(path)
+    return tree
+    
+def find_xml_frame_ntarget (root, f_num):
+  ntarget = root[f_num+2].attrib['density']
+  ntarget = int (ntarget)
+  return ntarget
+
+
+def ingnored_region(root):
+    ib = root[1]
+
+    #L = float (ib['left'])
+    #T = float (ib['top'])
+    #W = float (ib['width'])
+    #H = float (ib['height'])
+    #boxes = [int(L), int(T), int(W), int(H)]
+
+    return ib
+
+
+def find_xml_target (root, f_num, tar_id):
+    #print('box: ',root[f_num+2][0][tar_id][0].attrib)
+    a = root[f_num + 2][0][tar_id][0].attrib
+    L = 0
+    if 'left' in a:
+     L = float (a['left'])
+    T = float (a['top'])
+    W = float (a['width'])
+    H = float (a['height'])
+    box = [int(L), int(T), int(W), int(H)]
+
+    #print('attrib: ',root[f_num+2][0][tar_id][1].attrib)
+    b = root[f_num + 2][0][tar_id][1].attrib
+    tags = root[f_num + 2][0][tar_id]
+
+    Orient = b['orientation']
+    speed = b['speed']
+    t_l = b['trajectory_length']
+    t_r = b['truncation_ratio']
+    v_type = b['vehicle_type']
+
+    attrib = [Orient, speed, t_l, t_r, v_type]
+
+    #print('occlusion')
+    occ = root[f_num + 2][0][tar_id].find('occlusion')
+
+    if occ is not None:
+
+      for occChild in occ:
+
+       L = float (occChild.attrib['left'])
+       T = float (occChild.attrib['top'])
+       W = float (occChild.attrib['width'])
+       H = float (occChild.attrib['height'])
+       o_ID = float(occChild.attrib["occlusion_id"])
+       o_Status = float(occChild.attrib["occlusion_status"])
+       occlusion = [int(L), int(T), int(W), int(H),int(o_ID),int(o_Status)]
+    else:
+      occlusion = []
+
+
+
+
+    '''
+    result = {dict} {'orientation': '18.488', 'speed': '6.859', 'trajectory_length': '5', 'truncation_ratio': '0.1', 'vehicle_type': 'car'}
+     'orientation' (434302320) = {str} '18.488'
+     'speed' (434323616) = {str} '6.859'
+     'trajectory_length' (434304968) = {str} '5'
+     'truncation_ratio' (434305040) = {str} '0.1'
+     'vehicle_type' (434302384) = {str} 'car'
+     __len__ = {int} 5
+    
+    try:
+        print('occlusion: ',root[f_num+1][0][tar_id][2][0].attrib)
+    except:
+        print('no occlusion')
+    else:
+        print(' ')
+    '''
+    return box, attrib, occlusion    
+
+def fix_box(f_num, tar_id, data):
+    root[f_num+1][0][tar_id-1][0].attrib=data
+def fix_arritb(f_num, tar_id, data):
+    root[f_num+1][0][tar_id-1][1].attrib=data
+def fix_occlusion(f_num, tar_id, data):
+    root[f_num+1][0][tar_id-1][2][0].attrib=data
+    
+def save_xml(doc):
+    tree.write(doc)
+
+# ========== Main GUI Window ==========
+
+class DeTracGTWnd (VideoVizWnd.VideoVizWnd):
+  def __init__ (self, parent=None):
+    super (DeTracGTWnd, self).__init__ ()
+    self.APP_NAME = 'DeTracGT'
+    self.setWindowTitle ('%s - %s' % (self.APP_NAME, self.VIDEO_FILE))
+    #-----------------------------------
+
+    # load XML
+
+    #-----------------------------------
+
+    XML_file = '/Users/jinyutian/Desktop/PyCVApp_Run/DETRAC/MVI_20011.xml'
+    #XML_file = '/Users/jialunchen/OneDrive/Project/PyCV/detrac_anno_project/MVI_20011.xml'
+    self.tree = read_xml (XML_file)
+    self.root = self.tree.getroot()
+    
+    if self.root is None:
+      print ('BAD')
+      
+    GT = []
+    max_fi = 0
+    for child in self.root:
+      # print (child.tag, child.attrib)
+      # tag --> frame
+      # attrib {'density': '10', 'num': '664'}
+      #   which means frame 664 has 10 vehicles
+      if 'num' in child.attrib:
+        fi = int (child.attrib['num'])
+        max_fi = max (fi, max_fi)
+    print ('max_fi = ', max_fi)  
+      
+      
+        
+    if var.VERBOSE>3:
+      print ('end of DeTracGTWnd.__init__()')
+
+  def createActions (self):
+    super (DeTracGTWnd, self).createActions ()
+    self.createSandboxProcActions ()
+    
+  def createSandboxProcActions (self):
+    self.experimentAct = QAction ('&Experiment',
+        self, checkable=True, triggered=self.on_experiment)
+      
+  def setupImgProcMenu (self):
+    super (DeTracGTWnd, self).setupImgProcMenu () 
+    self.imgProcMenu.addSeparator ()   
+    self.imgProcMenu.addAction (self.experimentAct)
+        
+  def proc_frame_run_process (self):
+    super (DeTracGTWnd, self).proc_frame_run_process ()     
+    if self.activatedProcessAct == self.experimentAct:
+      self.experiment_proc ()
+  
+  def on_experiment (self):  
+    if self.activatedProcessAct == self.experimentAct:
+      self.activatedProcessAct.setChecked (False)
+      self.activatedProcessAct = None
+      self.active_proc = ''
+      self.qImg = np_qim.NpArrayToQImage (self.I)
+      self.visualizeImg (self.qImg)    
+      return
+    if self.activatedProcessAct is not None:
+      self.activatedProcessAct.setChecked (False)
+    self.activatedProcessAct = self.experimentAct
+    self.activatedProcessAct.setChecked (True)
+    self.active_proc = 'experiment'
+      
+    # Run process on current frame
+    self.proc_frame ()
+    
+    
+  def experiment_proc (self):
+    # process input image self.I as numpy array, output in self.Iout
+
+    # In this example, we simply create a upside-down image.
+    
+    # For the issue of using np.fliplr F_CONTINUOUS problem
+    # we need to make a copy to create a continuous array, 
+    # see https://stackoverflow.com/questions/20175187/numpy-flipped-image-cv2-filter2d-assertion-failed
+    #self.Iout = np.flipud (self.I).copy() 
+    self.Iout = self.I
+    
+    # now we are at frame FI    
+    # ---------------------------------------------
+    # draw ignored_region here in transparency box:
+    #----------------------------------------------
+    ignored_box = ingnored_region(self.root)
+
+    var.DRAWCMD_LIST = []
+    for child in ignored_box:
+
+      L = float (child.attrib['left'])
+      T = float (child.attrib['top'])
+      W = float (child.attrib['width'])
+      H = float (child.attrib['height'])
+      boxes = [int(L), int(T), int(W), int(H)]
+      drawcmd = ['rect', [boxes[0], boxes[1], boxes[2], boxes[3]]]
+      var.DRAWCMD_LIST.append(drawcmd)
+
+
+    
+    # number of vehicles in this frame
+    n_vehicles = find_xml_frame_ntarget (self.root, self.FI)
+    print ('%d : n %d' % (self.FI, n_vehicles))
+
+
+    for i in range (n_vehicles):
+      # for each vehicle, get info from XML
+      box, attrib, occlusion = find_xml_target (self.root, self.FI, i)
+      b = box
+      a = attrib
+      oc = occlusion
+
+
+      trkcol = [128, 0, 128] 
+      drawcmd = ['set_fg_col', trkcol]
+      var.DRAWCMD_LIST.append (drawcmd)     
+      
+      
+      drawcmd = ['rect', [b[0], b[1], b[2], b[3]]]
+      # draw vehicle box
+      #drawcmd = ['line', [110, 202, 300, 340]]
+      var.DRAWCMD_LIST.append (drawcmd)
+
+
+      # draw ID of box here:
+      #text = '%d' % ()
+      #drawcmd = ['text', [x0, y0-3, text]]
+      #var.DRAWCMD_LIST.append (drawcmd)
+
+
+      #draw occolusion zone
+      # I mean empty not None, so bug here
+      if oc is not None:
+        drawZone = ['rect', oc[0], oc[1], oc[2], oc[3]]
+        Octext = '%d' % (oc[4])
+        drawZone_text = ['text',[x0, y0-3,Octext]]
+        var.DRAWCMD_LIST.append(drawZone)
+        var.DRAWCMD_LIST.append(drawZone_text)
+      else:
+        return 0
+
+    
+  # ========== Process Factory - Start ==========
+  
+  # Here we want to update proc_functions from the inherited class level dictionary: https://stackoverflow.com/questions/8647370/python-update-inherited-class-level-dictionary
+  proc_functions = dict (VideoVizWnd.VideoVizWnd.proc_functions)  
+  proc_functions.update ({'experiment' : experiment_proc})
+  
+  proc_activations = dict (VideoVizWnd.VideoVizWnd.proc_activations)
+  proc_activations.update ({'experiment' : on_experiment})
+  
+  # This MUST be put after proc_functions definition!
+  def proc_frame_run_process (self):
+    ret = super (DeTracGTWnd, self).proc_frame_run_process ()
+    if ret:
+      return True #return if the process is run already
+      
+    # Go through the proc in proc_functions
+    for proc in self.proc_functions:
+      if self.active_proc == proc:
+        ret = self.proc_execute (proc)
+        if ret:
+          return True,
+          
+    return False  
+
+  # ========== Process Factory - End ==========
+        
+# ========== App Main ==========
+
+if __name__ == '__main__':
+  import sys  
+  var.INPUT_VIDEO = '../car.avi'
+
+  if len(var.INPUT_VIDEO) == 0 :
+    if len(sys.argv) == 1:
+      print ('Run: <input.avi>')
+  if len(sys.argv) > 1:
+    # Use the command-line input file
+    var.INPUT_VIDEO = str(sys.argv[1])
+  print ('INPUT_VIDEO = %s' % (var.INPUT_VIDEO))
+
+  app = QApplication (sys.argv)
+  app.setWindowIcon (QIcon('../VideoViz.png'))  
+  wnd = DeTracGTWnd ()
+  wnd.show ()
+  sys.exit (app.exec_())
